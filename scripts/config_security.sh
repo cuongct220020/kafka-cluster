@@ -45,28 +45,33 @@ keytool -keystore kafka.truststore.jks \
 
 
 echo "Create Keystore for Brokers..."
-# Lưu ý: SAN (Subject Alternative Name) cực kỳ quan trọng để Broker nhận diện nhau qua Docker Network và Localhost
 for i in 1 2 3; do
     BROKER="kafka-$i"
+    BROKER_IP="127.0.0.1"
     echo "Processing $BROKER..."
 
     # 1. Create Keystore
     keytool -genkeypair -alias $BROKER -keystore $BROKER.keystore.jks -keyalg RSA -keysize 2048 \
-        -validity 3650 -storepass confluent -keypass confluent \
-        -dname "CN=$BROKER, OU=IT, O=MyCompany, L=Hanoi, C=VN" \
-        -ext "SAN=DNS:$BROKER,DNS:localhost,IP:127.0.0.1"
+        -validity 3650 -storepass "$STORE_PASS" -keypass "$STORE_PASS" \
+        -dname "CN=$BROKER, OU=$ORG_UNIT, O=$ORG_NAME, L=$CITY, C=$COUNTRY_CODE" \
+        -ext "SAN=DNS:$BROKER,DNS:localhost,IP:$BROKER_IP"
+
 
     # 2. Create CSR
-    keytool -certreq -alias $BROKER -keystore $BROKER.keystore.jks -file $BROKER.csr -storepass confluent
+    keytool -certreq -alias $BROKER -keystore $BROKER.keystore.jks \
+        -file $BROKER.csr -storepass "$STORE_PASS" \
+        -ext "SAN=DNS:$BROKER,DNS:localhost,IP:$BROKER_IP"
+
 
     # 3. Sign CSR by CA
     openssl x509 -req -CA ca-cert.pem -CAkey ca-key.pem -in $BROKER.csr -out $BROKER-signed.pem \
-        -days 3650 -CAcreateserial -passin pass:confluent \
+        -days 3650 -CAcreateserial \
         -extensions v3_req -extfile <(printf "[v3_req]\nsubjectAltName=DNS:$BROKER,DNS:localhost,IP:127.0.0.1")
 
+
     # 4. Import signed CA and Cert to Keystore
-    keytool -importcert -alias CARoot -file ca-cert.pem -keystore $BROKER.keystore.jks -storepass confluent -noprompt
-    keytool -importcert -alias $BROKER -file $BROKER-signed.pem -keystore $BROKER.keystore.jks -storepass confluent -noprompt
+    keytool -importcert -alias CARoot -file ca-cert.pem -keystore $BROKER.keystore.jks -storepass "$STORE_PASS" -noprompt
+    keytool -importcert -alias $BROKER -file $BROKER-signed.pem -keystore $BROKER.keystore.jks -storepass "$STORE_PASS" -noprompt
 
     rm $BROKER.csr $BROKER-signed.pem
 done

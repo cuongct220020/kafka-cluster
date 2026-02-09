@@ -203,6 +203,10 @@ services:
       KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-1.keystore.jks'
       KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
 
+      KAFKA_LISTENER_NAME_CONTROLLER_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+      KAFKA_LISTENER_NAME_BROKER_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+      KAFKA_LISTENER_NAME_CLIENT_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+
       KAFKA_OPTS: >-
         -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
       KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
@@ -210,7 +214,7 @@ services:
       - bash
       - -c
       - |
-        # Generate JAAS config with admin user (for inter-broker and controller auth)
+        # Generate JAAS config - Only standard KafkaServer and KafkaClient sections
         cat > /etc/kafka/kafka_server_jaas.conf <<EOF
         KafkaServer {
            org.apache.kafka.common.security.scram.ScramLoginModule required
@@ -259,6 +263,10 @@ services:
       KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-2.keystore.jks'
       KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
 
+      KAFKA_LISTENER_NAME_CONTROLLER_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+      KAFKA_LISTENER_NAME_BROKER_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+      KAFKA_LISTENER_NAME_CLIENT_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+
       KAFKA_OPTS: >-
         -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
       KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
@@ -266,6 +274,7 @@ services:
       - bash
       - -c
       - |
+        # Generate JAAS config - Only standard KafkaServer and KafkaClient sections
         cat > /etc/kafka/kafka_server_jaas.conf <<EOF
         KafkaServer {
            org.apache.kafka.common.security.scram.ScramLoginModule required
@@ -314,6 +323,10 @@ services:
       KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-3.keystore.jks'
       KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
 
+      KAFKA_LISTENER_NAME_CONTROLLER_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+      KAFKA_LISTENER_NAME_BROKER_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+      KAFKA_LISTENER_NAME_CLIENT_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+
       KAFKA_OPTS: >-
         -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
       KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
@@ -321,6 +334,7 @@ services:
       - bash
       - -c
       - |
+        # Generate JAAS config - Only standard KafkaServer and KafkaClient sections
         cat > /etc/kafka/kafka_server_jaas.conf <<EOF
         KafkaServer {
            org.apache.kafka.common.security.scram.ScramLoginModule required
