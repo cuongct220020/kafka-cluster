@@ -1,16 +1,47 @@
 #!/bin/bash
+set -e
 
+if [ -f .env ]; then
+  export $(grep -v '^#' .env | xargs)
+fi
+
+CA_NAME="${1:-${CA_NAME:-Kafka-Security-CA}}"
+STORE_PASS="${2:-${KAFKA_SSL_SECRET:-confluent}}"
+COUNTRY_CODE="${3:-${COUNTRY_CODE:-VN}}"
+
+ORG_UNIT="IT-Department"
+ORG_NAME="MyCompany"
+CITY="Hanoi"
 SECRETS_DIR="./secrets"
+
+echo ">>> CONFIG:"
+echo "   CA Name: $CA_NAME"
+echo "   Country: $COUNTRY_CODE"
+echo "   Password: **** (Hidden)"
+
 mkdir -p $SECRETS_DIR
+cd $SECRETS_DIR
 
-
-echo "Create CA (Certificate Authority)..."
+echo "Create CA Private Key (ca-key.pem)..."
 openssl genrsa -out ca-key.pem 2048
-openssl req -new -x509 -key ca-key.pem -out ca-cert.pem -days 3650 -subj "/CN=Kafka-Security-CA"
 
 
-# Crete Truststore
-keytool -keystore kafka.truststore.jks -alias CARoot -import -file ca-cert.pem -storepass confluent -keypass -noprompt
+echo "Create CA Certificate (ca-cert.pem)..."
+openssl req -new -x509 \
+    -key ca-key.pem \
+    -out ca-cert.pem \
+    -days 3650 \
+    -subj "/C=$COUNTRY_CODE/ST=$CITY/L=$CITY/O=$ORG_NAME/OU=$ORG_UNIT/CN=$CA_NAME"
+
+
+echo "Create Common Truststore (kafka.truststore.jks)..."
+rm -f kafka.truststore.jks
+
+keytool -keystore kafka.truststore.jks \
+    -alias CARoot \
+    -import -file ca-cert.pem \
+    -storepass "$STORE_PASS" \
+    -noprompt
 
 
 echo "Create Keystore for Brokers..."
@@ -41,3 +72,4 @@ for i in 1 2 3; do
 done
 
 chmod -R 777 .
+echo ">>> DONE! Secrets generated in $SECRETS_DIR"
