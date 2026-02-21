@@ -1,69 +1,28 @@
-# GIẢI PHÁP CUỐI CÙNG: SSL cho CONTROLLER, SASL_SSL cho BROKER/CLIENT
-# Lý do: SCRAM trong KRaft quorum rất phức tạp, dùng SSL (mutual TLS) cho controller an toàn hơn
-
 x-kafka-env-common: &kafka-env-common
   KAFKA_PROCESS_ROLES: 'broker,controller'
   KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka-1:29093,2@kafka-2:29093,3@kafka-3:29093'
   CLUSTER_ID: ${KAFKA_CLUSTER_ID}
 
-  # === SECURITY CONFIGURATION ===
-  # CONTROLLER: SSL (mutual TLS) - an toàn cho internal quorum
-  # BROKER: SASL_SSL (SCRAM) - bảo mật cho inter-broker
-  # CLIENT: SASL_SSL (SCRAM) - bảo mật cho external clients
-  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:SSL,BROKER:SASL_SSL,CLIENT:SASL_SSL'
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:SASL_PLAINTEXT,BROKER:SASL_PLAINTEXT,CLIENT:SASL_PLAINTEXT'
   KAFKA_INTER_BROKER_LISTENER_NAME: 'BROKER'
   KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
 
-  # SCRAM cho BROKER và CLIENT
   KAFKA_SASL_ENABLED_MECHANISMS: 'SCRAM-SHA-256'
   KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: 'SCRAM-SHA-256'
+  KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: 'SCRAM-SHA-256'
 
-  # SSL Global
-  KAFKA_SSL_TRUSTSTORE_LOCATION: '/etc/kafka/secrets/kafka.truststore.jks'
-  KAFKA_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-  KAFKA_SSL_KEY_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-  KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ''
-  KAFKA_SSL_CLIENT_AUTH: 'required'
-
-  # CONTROLLER: SSL với mutual TLS
-  KAFKA_LISTENER_NAME_CONTROLLER_SSL_TRUSTSTORE_LOCATION: '/etc/kafka/secrets/kafka.truststore.jks'
-  KAFKA_LISTENER_NAME_CONTROLLER_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-  KAFKA_LISTENER_NAME_CONTROLLER_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ''
-  KAFKA_LISTENER_NAME_CONTROLLER_SSL_CLIENT_AUTH: 'required'
-
-  # BROKER: SASL_SSL
-  KAFKA_LISTENER_NAME_BROKER_SSL_TRUSTSTORE_LOCATION: '/etc/kafka/secrets/kafka.truststore.jks'
-  KAFKA_LISTENER_NAME_BROKER_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-  KAFKA_LISTENER_NAME_BROKER_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ''
-  KAFKA_LISTENER_NAME_BROKER_SASL_ENABLED_MECHANISMS: 'SCRAM-SHA-256'
-
-  # CLIENT: SASL_SSL
-  KAFKA_LISTENER_NAME_CLIENT_SSL_TRUSTSTORE_LOCATION: '/etc/kafka/secrets/kafka.truststore.jks'
-  KAFKA_LISTENER_NAME_CLIENT_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-  KAFKA_LISTENER_NAME_CLIENT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ''
-  KAFKA_LISTENER_NAME_CLIENT_SASL_ENABLED_MECHANISMS: 'SCRAM-SHA-256'
-
-  # Authorization
   KAFKA_AUTHORIZER_CLASS_NAME: 'org.apache.kafka.metadata.authorizer.StandardAuthorizer'
   KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: 'false'
-  KAFKA_SUPER_USERS: 'User:admin;User:CN=kafka-1;User:CN=kafka-2;User:CN=kafka-3'
+  KAFKA_SUPER_USERS: 'User:admin'
 
-  KAFKA_NUM_NETWORK_THREADS: 5
-  KAFKA_NUM_IO_THREADS: 5
   KAFKA_NUM_PARTITIONS: 4
-
   KAFKA_DEFAULT_REPLICATION_FACTOR: 2
   KAFKA_MIN_INSYNC_REPLICAS: 1
-  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
-  KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: 10
-  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
-  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-
   KAFKA_LOG_RETENTION_HOURS: 48
-  KAFKA_LOG_RETENTION_BYTES: '1073741824'
   KAFKA_HEAP_OPTS: "-Xms512M -Xmx512M"
-  KAFKA_LOG4J_ROOT_LOGLEVEL: 'WARN'
-  KAFKA_TOOLS_LOG4J_LOGLEVEL: 'ERROR'
+
+  # FIX 1: Trỏ JVM tới JAAS file được tạo trong entrypoint
+  KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf"
 
 x-kafka-service-common: &kafka-service-common
   image: confluentinc/cp-kafka:${KAFKA_STACK_VERSION:-7.7.7}
@@ -71,21 +30,39 @@ x-kafka-service-common: &kafka-service-common
     - kafka-net
   restart: unless-stopped
   healthcheck:
-    test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
-    interval: 15s
+    test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092", "--command-config", "/etc/kafka/secrets/client-healthcheck.properties"]
+    interval: 20s
     timeout: 10s
-    retries: 8
-    start_period: 60s
-  logging:
-    driver: "json-file"
-    options:
-      max-size: "10m"
-      max-file: "3"
-  deploy:
-    resources:
-      limits:
-        cpus: '1.0'
-        memory: 1024M
+    retries: 5
+
+# FIX 2: Entrypoint tạo JAAS file với đủ 3 sections (KafkaServer, controller.KafkaServer, KafkaClient)
+# FIX 3: KAFKA_ADMIN_PASSWORD phải có trong env của từng broker để shell expand được
+x-kafka-entrypoint: &kafka-entrypoint
+  entrypoint:
+    - bash
+    - -c
+    - |
+      {
+        echo 'KafkaServer {'
+        echo '  org.apache.kafka.common.security.scram.ScramLoginModule required'
+        echo '  username="admin"'
+        echo "  password=\"${KAFKA_ADMIN_PASSWORD}\";"
+        echo '};'
+        echo 'controller.KafkaServer {'
+        echo '  org.apache.kafka.common.security.scram.ScramLoginModule required'
+        echo '  username="admin"'
+        echo "  password=\"${KAFKA_ADMIN_PASSWORD}\";"
+        echo '};'
+        echo 'KafkaClient {'
+        echo '  org.apache.kafka.common.security.scram.ScramLoginModule required'
+        echo '  username="admin"'
+        echo "  password=\"${KAFKA_ADMIN_PASSWORD}\";"
+        echo '};'
+      } > /etc/kafka/kafka_server_jaas.conf
+
+      echo "==> JAAS file created:"
+      cat /etc/kafka/kafka_server_jaas.conf
+      exec /etc/confluent/docker/run
 
 services:
   kafka-init:
@@ -100,72 +77,71 @@ services:
       - -c
       - |
         echo '=========================================='
-        echo 'Bootstrapping Kafka KRaft Cluster'
-        echo 'CONTROLLER: SSL (mutual TLS)'
-        echo 'BROKER/CLIENT: SASL_SSL (SCRAM)'
+        echo 'Bootstrapping Kafka KRaft Cluster with SCRAM'
         echo '=========================================='
-        
-        echo ""
-        echo "Formatting Node 1..."
+
+        # Ghi config ra file bằng echo (tránh vấn đề indent của heredoc trong YAML)
+        VOTERS="1@kafka-1:29093,2@kafka-2:29093,3@kafka-3:29093"
+
+        {
+          echo "process.roles=broker,controller"
+          echo "node.id=1"
+          echo "controller.quorum.voters=$${VOTERS}"
+          echo "listeners=CONTROLLER://kafka-1:29093,BROKER://kafka-1:29092"
+          echo "advertised.listeners=BROKER://kafka-1:29092"
+          echo "listener.security.protocol.map=CONTROLLER:SASL_PLAINTEXT,BROKER:SASL_PLAINTEXT"
+          echo "controller.listener.names=CONTROLLER"
+          echo "inter.broker.listener.name=BROKER"
+          echo "log.dirs=/data/kafka-1"
+        } > /tmp/node1.properties
+
+        {
+          echo "process.roles=broker,controller"
+          echo "node.id=2"
+          echo "controller.quorum.voters=$${VOTERS}"
+          echo "listeners=CONTROLLER://kafka-2:29093,BROKER://kafka-2:29092"
+          echo "advertised.listeners=BROKER://kafka-2:29092"
+          echo "listener.security.protocol.map=CONTROLLER:SASL_PLAINTEXT,BROKER:SASL_PLAINTEXT"
+          echo "controller.listener.names=CONTROLLER"
+          echo "inter.broker.listener.name=BROKER"
+          echo "log.dirs=/data/kafka-2"
+        } > /tmp/node2.properties
+
+        {
+          echo "process.roles=broker,controller"
+          echo "node.id=3"
+          echo "controller.quorum.voters=$${VOTERS}"
+          echo "listeners=CONTROLLER://kafka-3:29093,BROKER://kafka-3:29092"
+          echo "advertised.listeners=BROKER://kafka-3:29092"
+          echo "listener.security.protocol.map=CONTROLLER:SASL_PLAINTEXT,BROKER:SASL_PLAINTEXT"
+          echo "controller.listener.names=CONTROLLER"
+          echo "inter.broker.listener.name=BROKER"
+          echo "log.dirs=/data/kafka-3"
+        } > /tmp/node3.properties
+
+        echo "Step 1: Formatting Node 1..."
         kafka-storage format --ignore-formatted \
-          -t "$${KAFKA_CLUSTER_ID}" \
-          -c <(cat <<EOF
-        process.roles=broker,controller
-        node.id=1
-        controller.quorum.voters=1@kafka-1:29093,2@kafka-2:29093,3@kafka-3:29093
-        listeners=CONTROLLER://kafka-1:29093,BROKER://kafka-1:29092
-        advertised.listeners=BROKER://kafka-1:29092
-        listener.security.protocol.map=CONTROLLER:SSL,BROKER:SASL_SSL
-        controller.listener.names=CONTROLLER
-        inter.broker.listener.name=BROKER
-        log.dirs=/data/kafka-1
-        EOF
-        ) \
-          --add-scram "SCRAM-SHA-256=[name=admin,password=$${KAFKA_ADMIN_PASSWORD},iterations=8192]" \
-          --add-scram "SCRAM-SHA-256=[name=client,password=$${KAFKA_CLIENT_PASSWORD},iterations=8192]"
-        
-        echo ""
-        echo "Formatting Node 2..."
+          -t "${KAFKA_CLUSTER_ID}" \
+          -c /tmp/node1.properties \
+          --add-scram "SCRAM-SHA-256=[name=admin,password=${KAFKA_ADMIN_PASSWORD},iterations=8192]" \
+          --add-scram "SCRAM-SHA-256=[name=client,password=${KAFKA_CLIENT_PASSWORD},iterations=8192]"
+
+        echo "Step 2: Formatting Node 2..."
         kafka-storage format --ignore-formatted \
-          -t "$${KAFKA_CLUSTER_ID}" \
-          -c <(cat <<EOF
-        process.roles=broker,controller
-        node.id=2
-        controller.quorum.voters=1@kafka-1:29093,2@kafka-2:29093,3@kafka-3:29093
-        listeners=CONTROLLER://kafka-2:29093,BROKER://kafka-2:29092
-        advertised.listeners=BROKER://kafka-2:29092
-        listener.security.protocol.map=CONTROLLER:SSL,BROKER:SASL_SSL
-        controller.listener.names=CONTROLLER
-        inter.broker.listener.name=BROKER
-        log.dirs=/data/kafka-2
-        EOF
-        ) \
-          --add-scram "SCRAM-SHA-256=[name=admin,password=$${KAFKA_ADMIN_PASSWORD},iterations=8192]" \
-          --add-scram "SCRAM-SHA-256=[name=client,password=$${KAFKA_CLIENT_PASSWORD},iterations=8192]"
-        
-        echo ""
-        echo "Formatting Node 3..."
+          -t "${KAFKA_CLUSTER_ID}" \
+          -c /tmp/node2.properties \
+          --add-scram "SCRAM-SHA-256=[name=admin,password=${KAFKA_ADMIN_PASSWORD},iterations=8192]" \
+          --add-scram "SCRAM-SHA-256=[name=client,password=${KAFKA_CLIENT_PASSWORD},iterations=8192]"
+
+        echo "Step 3: Formatting Node 3..."
         kafka-storage format --ignore-formatted \
-          -t "$${KAFKA_CLUSTER_ID}" \
-          -c <(cat <<EOF
-        process.roles=broker,controller
-        node.id=3
-        controller.quorum.voters=1@kafka-1:29093,2@kafka-2:29093,3@kafka-3:29093
-        listeners=CONTROLLER://kafka-3:29093,BROKER://kafka-3:29092
-        advertised.listeners=BROKER://kafka-3:29092
-        listener.security.protocol.map=CONTROLLER:SSL,BROKER:SASL_SSL
-        controller.listener.names=CONTROLLER
-        inter.broker.listener.name=BROKER
-        log.dirs=/data/kafka-3
-        EOF
-        ) \
-          --add-scram "SCRAM-SHA-256=[name=admin,password=$${KAFKA_ADMIN_PASSWORD},iterations=8192]" \
-          --add-scram "SCRAM-SHA-256=[name=client,password=$${KAFKA_CLIENT_PASSWORD},iterations=8192]"
-        
-        echo ""
+          -t "${KAFKA_CLUSTER_ID}" \
+          -c /tmp/node3.properties \
+          --add-scram "SCRAM-SHA-256=[name=admin,password=${KAFKA_ADMIN_PASSWORD},iterations=8192]" \
+          --add-scram "SCRAM-SHA-256=[name=client,password=${KAFKA_CLIENT_PASSWORD},iterations=8192]"
+
         echo '=========================================='
         echo 'Bootstrap completed!'
-        echo 'SCRAM users: admin, client'
         echo '=========================================='
     environment:
       KAFKA_CLUSTER_ID: ${KAFKA_CLUSTER_ID}
@@ -175,7 +151,7 @@ services:
       - kafka-net
 
   kafka-1:
-    <<: *kafka-service-common
+    <<: [*kafka-service-common, *kafka-entrypoint]
     container_name: kafka-1
     hostname: kafka-1
     environment:
@@ -183,52 +159,18 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_LISTENERS: 'BROKER://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,CLIENT://0.0.0.0:9092'
       KAFKA_ADVERTISED_LISTENERS: 'BROKER://kafka-1:29092,CLIENT://localhost:${KAFKA_NODE1_PORT:-9092}'
-
-      KAFKA_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-1.keystore.jks'
-      KAFKA_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_LISTENER_NAME_CONTROLLER_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-1.keystore.jks'
-      KAFKA_LISTENER_NAME_CONTROLLER_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_LISTENER_NAME_BROKER_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-1.keystore.jks'
-      KAFKA_LISTENER_NAME_BROKER_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-1.keystore.jks'
-      KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_OPTS: >-
-        -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
       KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
-    entrypoint:
-      - bash
-      - -c
-      - |
-        cat > /etc/kafka/kafka_server_jaas.conf <<EOF
-        KafkaServer {
-           org.apache.kafka.common.security.scram.ScramLoginModule required
-           username="admin"
-           password="$${KAFKA_ADMIN_PASSWORD}";
-        };
-        
-        KafkaClient {
-           org.apache.kafka.common.security.scram.ScramLoginModule required
-           username="admin"
-           password="$${KAFKA_ADMIN_PASSWORD}";
-        };
-        EOF
-        
-        exec /etc/confluent/docker/run
-    ports:
-      - "${KAFKA_NODE1_PORT:-9092}:9092"
     volumes:
       - kafka-1-data:/var/lib/kafka/data
       - ./secrets:/etc/kafka/secrets:ro
+    ports:
+      - "${KAFKA_NODE1_PORT:-9092}:9092"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
 
   kafka-2:
-    <<: *kafka-service-common
+    <<: [*kafka-service-common, *kafka-entrypoint]
     container_name: kafka-2
     hostname: kafka-2
     environment:
@@ -236,52 +178,18 @@ services:
       KAFKA_NODE_ID: 2
       KAFKA_LISTENERS: 'BROKER://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,CLIENT://0.0.0.0:9092'
       KAFKA_ADVERTISED_LISTENERS: 'BROKER://kafka-2:29092,CLIENT://localhost:${KAFKA_NODE2_PORT:-9093}'
-
-      KAFKA_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-2.keystore.jks'
-      KAFKA_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_LISTENER_NAME_CONTROLLER_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-2.keystore.jks'
-      KAFKA_LISTENER_NAME_CONTROLLER_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_LISTENER_NAME_BROKER_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-2.keystore.jks'
-      KAFKA_LISTENER_NAME_BROKER_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-2.keystore.jks'
-      KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_OPTS: >-
-        -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
       KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
-    entrypoint:
-      - bash
-      - -c
-      - |
-        cat > /etc/kafka/kafka_server_jaas.conf <<EOF
-        KafkaServer {
-           org.apache.kafka.common.security.scram.ScramLoginModule required
-           username="admin"
-           password="$${KAFKA_ADMIN_PASSWORD}";
-        };
-        
-        KafkaClient {
-           org.apache.kafka.common.security.scram.ScramLoginModule required
-           username="admin"
-           password="$${KAFKA_ADMIN_PASSWORD}";
-        };
-        EOF
-        
-        exec /etc/confluent/docker/run
-    ports:
-      - "${KAFKA_NODE2_PORT:-9093}:9092"
     volumes:
       - kafka-2-data:/var/lib/kafka/data
       - ./secrets:/etc/kafka/secrets:ro
+    ports:
+      - "${KAFKA_NODE2_PORT:-9093}:9092"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
 
   kafka-3:
-    <<: *kafka-service-common
+    <<: [*kafka-service-common, *kafka-entrypoint]
     container_name: kafka-3
     hostname: kafka-3
     environment:
@@ -289,49 +197,16 @@ services:
       KAFKA_NODE_ID: 3
       KAFKA_LISTENERS: 'BROKER://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,CLIENT://0.0.0.0:9092'
       KAFKA_ADVERTISED_LISTENERS: 'BROKER://kafka-3:29092,CLIENT://localhost:${KAFKA_NODE3_PORT:-9094}'
-
-      KAFKA_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-3.keystore.jks'
-      KAFKA_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_LISTENER_NAME_CONTROLLER_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-3.keystore.jks'
-      KAFKA_LISTENER_NAME_CONTROLLER_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_LISTENER_NAME_BROKER_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-3.keystore.jks'
-      KAFKA_LISTENER_NAME_BROKER_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-3.keystore.jks'
-      KAFKA_LISTENER_NAME_CLIENT_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-
-      KAFKA_OPTS: >-
-        -Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf
       KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
-    entrypoint:
-      - bash
-      - -c
-      - |
-        cat > /etc/kafka/kafka_server_jaas.conf <<EOF
-        KafkaServer {
-           org.apache.kafka.common.security.scram.ScramLoginModule required
-           username="admin"
-           password="$${KAFKA_ADMIN_PASSWORD}";
-        };
-        
-        KafkaClient {
-           org.apache.kafka.common.security.scram.ScramLoginModule required
-           username="admin"
-           password="$${KAFKA_ADMIN_PASSWORD}";
-        };
-        EOF
-        
-        exec /etc/confluent/docker/run
-    ports:
-      - "${KAFKA_NODE3_PORT:-9094}:9092"
     volumes:
       - kafka-3-data:/var/lib/kafka/data
       - ./secrets:/etc/kafka/secrets:ro
+    ports:
+      - "${KAFKA_NODE3_PORT:-9094}:9092"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+
 
   schema-registry:
     image: confluentinc/cp-schema-registry:${KAFKA_STACK_VERSION:-7.7.7}
@@ -342,12 +217,9 @@ services:
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka-1:29092,kafka-2:29092,kafka-3:29092'
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 2
-      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: SASL_SSL
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: SASL_PLAINTEXT
       SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM: SCRAM-SHA-256
       SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
-      SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION: '/etc/kafka/secrets/kafka.truststore.jks'
-      SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-      SCHEMA_REGISTRY_KAFKASTORE_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ''
     ports:
       - "${SCHEMA_REGISTRY_PORT:-8881}:8081"
     volumes:
@@ -363,7 +235,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8081"]
+      test: [ "CMD", "curl", "--fail", "http://localhost:8081" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -372,20 +244,18 @@ services:
         limits:
           memory: 500MB
 
+
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
     hostname: kafka-ui
-    profiles: ["ui"]
+    profiles: [ "ui" ]
     environment:
       KAFKA_CLUSTERS_0_NAME: secure-kraft-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-1:29092,kafka-2:29092,kafka-3:29092
-      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: SASL_SSL
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: SASL_PLAINTEXT
       KAFKA_CLUSTERS_0_PROPERTIES_SASL_MECHANISM: SCRAM-SHA-256
       KAFKA_CLUSTERS_0_PROPERTIES_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
-      KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_LOCATION: '/etc/kafka/secrets/kafka.truststore.jks'
-      KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
-      KAFKA_CLUSTERS_0_PROPERTIES_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ''
       KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
       DYNAMIC_CONFIG_ENABLED: 'true'
     ports:
@@ -404,6 +274,7 @@ services:
       resources:
         limits:
           memory: 500MB
+
 
 volumes:
   kafka-1-data:
