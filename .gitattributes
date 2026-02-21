@@ -1,0 +1,21 @@
+# text files
+* text=auto eol=lf
+
+# scripts
+*.sh text eol=lf
+
+# config
+*.yml text
+*.yaml text
+*.env text
+*.conf text
+
+# certificates
+*.pem text
+*.csr text
+
+# binary
+*.p12 binary
+*.keystore binary
+*.zip binary
+*.tar binary

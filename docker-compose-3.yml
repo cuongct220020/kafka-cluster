@@ -1,0 +1,184 @@
+version: '3.8'
+
+x-kafka-env-common: &kafka-env-common
+  KAFKA_PROCESS_ROLES: 'broker,controller'
+  KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka-1:29093,2@kafka-2:29093,3@kafka-3:29093'
+  CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+
+  # === SECURITY ===
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:SASL_SSL,BROKER:SASL_SSL,CLIENT:SASL_SSL'
+  KAFKA_INTER_BROKER_LISTENER_NAME: 'BROKER'
+  KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+  KAFKA_SASL_ENABLED_MECHANISMS: 'SCRAM-SHA-256'
+  KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: 'SCRAM-SHA-256'
+  KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: 'SCRAM-SHA-256'
+
+  # === SSL ===
+  KAFKA_SSL_TRUSTSTORE_LOCATION: '/etc/kafka/secrets/kafka.truststore.jks'
+  KAFKA_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
+  KAFKA_SSL_KEY_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
+  KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ''
+
+  # === JAAS (QUAN TRỌNG: Trỏ vào file chúng ta vừa tạo) ===
+  KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf"
+
+  # Authorization
+  KAFKA_AUTHORIZER_CLASS_NAME: 'org.apache.kafka.metadata.authorizer.StandardAuthorizer'
+  KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: 'false'
+  KAFKA_SUPER_USERS: 'User:admin'
+
+  # Tuning
+  KAFKA_NUM_PARTITIONS: 4
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 2
+  KAFKA_MIN_INSYNC_REPLICAS: 1
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+
+x-kafka-service-common: &kafka-service-common
+  image: confluentinc/cp-kafka:${KAFKA_STACK_VERSION:-7.7.7}
+  networks:
+    - kafka-net
+  restart: unless-stopped
+  volumes:
+    # Mount thư mục secrets vào trong container
+    - ./secrets:/etc/kafka/secrets:ro
+  deploy:
+    resources:
+      limits:
+        cpus: '1.0'
+        memory: 1024M
+
+services:
+  kafka-init:
+    image: confluentinc/cp-kafka:${KAFKA_STACK_VERSION:-7.7.7}
+    container_name: kafka-init
+    user: root  # REQUIRED: Run as root to change file ownership
+    volumes:
+      - kafka-1-data:/data/kafka-1
+      - kafka-2-data:/data/kafka-2
+      - kafka-3-data:/data/kafka-3
+    command:
+      - bash
+      - -c
+      - |
+        echo "Creating minimal KRaft config..."
+        cat <<EOF > /tmp/config.properties
+        process.roles=broker,controller
+        node.id=1
+        controller.quorum.voters=1@kafka-1:29093,2@kafka-2:29093,3@kafka-3:29093
+        listeners=CONTROLLER://:29093
+        controller.listener.names=CONTROLLER
+        log.dirs=/data/kafka-1
+        EOF
+        
+        echo 'Formatting Kafka Storage...'
+        kafka-storage format --ignore-formatted -t "$${KAFKA_CLUSTER_ID}" -c /tmp/config.properties \
+          --add-scram "SCRAM-SHA-256=[name=admin,password=$${KAFKA_ADMIN_PASSWORD},iterations=8192]" \
+          --add-scram "SCRAM-SHA-256=[name=client,password=$${KAFKA_CLIENT_PASSWORD},iterations=8192]"
+        
+        echo 'Cloning data to other nodes...'
+        rm -rf /data/kafka-2/* /data/kafka-2/.* 2>/dev/null || true
+        rm -rf /data/kafka-3/* /data/kafka-3/.* 2>/dev/null || true
+        
+        cp -a /data/kafka-1/. /data/kafka-2/
+        cp -a /data/kafka-1/. /data/kafka-3/
+        
+        echo 'Updating meta.properties...'
+        sed -i 's/node.id=1/node.id=2/' /data/kafka-2/meta.properties
+        sed -i 's/node.id=1/node.id=3/' /data/kafka-3/meta.properties
+        
+        echo 'FIXING PERMISSIONS...'
+        # Change ownership to appuser (UID 1000) so brokers can read the files
+        chown -R 1000:1000 /data/kafka-1 /data/kafka-2 /data/kafka-3
+        
+        echo 'Done!'
+    environment:
+      KAFKA_CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
+      KAFKA_CLIENT_PASSWORD: ${KAFKA_CLIENT_PASSWORD}
+    networks:
+      - kafka-net
+
+  # NODE 1
+  kafka-1:
+    <<: *kafka-service-common
+    container_name: kafka-1
+    hostname: kafka-1
+    environment:
+      <<: *kafka-env-common
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: 'BROKER://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,CLIENT://0.0.0.0:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'BROKER://kafka-1:29092,CLIENT://localhost:${KAFKA_NODE1_PORT:-9092}'
+      KAFKA_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-1.keystore.jks'
+      KAFKA_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
+    volumes:
+      - kafka-1-data:/var/lib/kafka/data
+      - ./secrets:/etc/kafka/secrets:ro
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  # NODE 2
+  kafka-2:
+    <<: *kafka-service-common
+    container_name: kafka-2
+    hostname: kafka-2
+    environment:
+      <<: *kafka-env-common
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: 'BROKER://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,CLIENT://0.0.0.0:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'BROKER://kafka-2:29092,CLIENT://localhost:${KAFKA_NODE2_PORT:-9093}'
+      KAFKA_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-2.keystore.jks'
+      KAFKA_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+      - ./secrets:/etc/kafka/secrets:ro
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  # NODE 3
+  kafka-3:
+    <<: *kafka-service-common
+    container_name: kafka-3
+    hostname: kafka-3
+    environment:
+      <<: *kafka-env-common
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: 'BROKER://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,CLIENT://0.0.0.0:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'BROKER://kafka-3:29092,CLIENT://localhost:${KAFKA_NODE3_PORT:-9094}'
+      KAFKA_SSL_KEYSTORE_LOCATION: '/etc/kafka/secrets/kafka-3.keystore.jks'
+      KAFKA_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+      - ./secrets:/etc/kafka/secrets:ro
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+#  # KAFKA UI
+#  kafka-ui:
+#    image: provectuslabs/kafka-ui:latest
+#    container_name: kafka-ui
+#    ports:
+#      - "${KAFKA_UI_PORT:-8889}:8080"
+#    environment:
+#      KAFKA_CLUSTERS_0_NAME: local-cluster
+#      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-1:29092
+#      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: SASL_SSL
+#      KAFKA_CLUSTERS_0_PROPERTIES_SASL_MECHANISM: SCRAM-SHA-256
+#      KAFKA_CLUSTERS_0_PROPERTIES_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASSWORD}";'
+#      KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_LOCATION: '/etc/kafka/secrets/kafka.truststore.jks'
+#      KAFKA_CLUSTERS_0_PROPERTIES_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_SECRET:-confluent}
+#    volumes:
+#      - ./secrets:/etc/kafka/secrets:ro
+#    networks:
+#      - kafka-net
+
+volumes:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:
+
+networks:
+  kafka-net:
+    driver: bridge

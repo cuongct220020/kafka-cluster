@@ -162,7 +162,7 @@ services:
         EOF
         ) \
           --add-scram "SCRAM-SHA-256=[name=admin,password=$${KAFKA_ADMIN_PASSWORD},iterations=8192]" \
-          --add-scram "SCRAM-SHA-256=[name=client,password=$${KAFKA_CLIENT_PASSWORD},iterations=8192]"
+          --add-scram "SCRAM-SHA-256=[name=client,password=$${KAFKA_CLIENT_PASSWORD},iterations=8192]" 
         
         echo ""
         echo '=========================================='
